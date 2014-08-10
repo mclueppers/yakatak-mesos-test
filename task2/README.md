@@ -27,6 +27,22 @@ In the end your Vagrantfile should look like this
 # -*- mode: ruby -*-
 # vi: set ft=ruby :
 
+# Configuration
+masters = [ { :ip => "192.168.50.10", :hostname => "master1", :public_mac => "08002711DFF7", :private_mac => "08002711DFF8" } ]
+slaves  = [ { :ip => "192.168.50.11", :hostname => "slave1", :public_mac => "08002711DFF9", :private_mac => "08002711DFFA" },
+            { :ip => "192.168.50.12", :hostname => "slave2", :public_mac => "08002711DFFB", :private_mac => "08002711DFFC" },
+]
+mesos_ver = "0.19.1"
+
+# Definitions
+def is_master?(name)
+   return /^master[0-9]/ =~ name
+end
+
+def is_slave?(name)
+   return /^slave/ =~ name
+end
+
 # Vagrantfile API/syntax version. Don't touch unless you know what you're doing!
 VAGRANTFILE_API_VERSION = "2"
 
@@ -60,115 +76,80 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
   end
 
 
-  [ "master1", "slave1", "slave2" ].each do |hst|
-    config.vm.define "#{hst}" do |node|
+  [ masters, slaves ].flatten.each_with_index do |nodeinfo, i|
+    config.vm.define nodeinfo[:hostname] do |node|
       node.vm.provider "virtualbox" do |vb, override|
 
         override.vm.box = "ubuntu/trusty64"
 
-        override.vm.hostname = "mesos-#{hst}"
+        override.vm.hostname = "mesos-" + nodeinfo[:hostname]
+        override.vm.network "private_network", ip: nodeinfo[:ip], mac: nodeinfo[:private_mac]
         override.vm.provision :hosts
 
-        case "#{hst}"
-          when /^master1$/
-            override.vm.network "public_network", type: "dhcp", mac: "08002711DFF7", bridge: "en1: Wi-Fi (AirPort)"
-            override.vm.network "private_network", ip: "192.168.50.10", mac: "08002711DFF8"
-            vb.gui = true
+        vb.name = 'mesos-' + nodeinfo[:hostname]
+        # vb.gui = true
+        vb.customize ["modifyvm", :id, "--memory", 1024, "--cpus", 2 ]
 
-            override.vm.provision :shell, :inline => <<SCRIPT
-    sed -n '/127.0.1.1/!p' -i /etc/hosts
-    sudo apt-get install marathon
-SCRIPT
+	# mesos-master doesn't create its work_dir.
+	master_work_dir = "/var/run/mesos"
+	if is_master?(nodeinfo[:hostname]) then
+	    override.vm.provision :shell, :inline => "mkdir -p #{master_work_dir}"
+	end
 
-            override.vm.provision :chef_solo do |chef|
-              # chef.log_level = :debug
-              chef.add_recipe "apt"
-              chef.add_recipe "mesos"
+	override.vm.provision :chef_solo do |chef|
+            # chef.log_level = :debug
+            chef.add_recipe "apt"
+            chef.add_recipe "mesos"
 
+            if is_master?(nodeinfo[:hostname]) then
               chef.add_recipe "mesos::master"
               chef.json  = {
                 :mesos=> {
-                  :type         => "mesosphere",
-                  :version      => "0.19.1",
-                  :master_ips   => [ "192.168.50.10"],
-                  :slave_ips    => [ "192.168.50.11", "192.168.50.12"],
-                  :mesosphere   => {
-                     :with_zookeeper => true
-                  },
-                  :master       => {
-                     :cluster => "MyFirstMesosCluster",
-                     :zk => "zk://192.168.50.10:2181/mesos",
-                     :quorum => "1",
-                     :work_dir => "/var/lib/mesos",
-                     :ip => "192.168.50.10"
-                  }
+                   :type         => "mesosphere",
+                   :version      => "#{mesos_ver}",
+                   :master_ips   => masters.map { |m| "#{m[:ip]}" },
+                   :slave_ips    => slaves.map { |s| "#{s[:ip]}" },
+		   :mesosphere   => {
+		       :with_zookeeper => true
+		   },
+                   :master       => {
+                       :cluster => "MyFirstMesosCluster",
+                       :quorum => "#{(masters.length.to_f/2).ceil}",
+                       :work_dir => master_work_dir,
+                       :zk => "zk://192.168.50.10:2181/mesos",
+                       :ip => "#{nodeinfo[:ip]}"
+                   }
                 }
               }
-            end
+            elsif is_slave?(nodeinfo[:hostname]) then
+	      chef.add_recipe "docker::aufs"
+	      chef.add_recipe "docker::lxc"
+	      chef.add_recipe "docker"
+	      chef.add_recipe "mesos::slave"
+	      chef.add_recipe "mesos::docker-executor"
+	      chef.json = {
+	          :mesos => {
+	              :type         => "mesosphere",
+		      :version      => "#{mesos_ver}",
+		      :slave        => {
+		          :master       => "zk://192.168.50.10:2181/mesos",
+			  :ip           => "#{nodeinfo[:ip]}",
+			  :isolation    => "process"
+		      }
+		  }
+	       }
+	     end
+	  end
 
-          when /^slave1$/
-            override.vm.network "public_network", type: "dhcp", bridge: "en1: Wi-Fi (AirPort)", :mac => "08002711DFF9"
-            override.vm.network "private_network", ip: "192.168.50.11", :mac => "08002711DFFA"
-            override.vm.provision :shell, :inline => <<SCRIPT
-    sed -n '/127.0.1.1/!p' -i /etc/hosts
-SCRIPT
-            override.vm.provision :chef_solo do |chef|
-              # chef.log_level = :debug
-              chef.add_recipe "apt"
-              chef.add_recipe "mesos"
-
-              chef.add_recipe "docker::aufs"
-              chef.add_recipe "docker::lxc"
-              chef.add_recipe "docker"
-              chef.add_recipe "mesos::slave"
-              chef.add_recipe "mesos::docker-executor"
-              chef.json  = {
-                :mesos=> {
-                  :type         => "mesosphere",
-                  :version      => "0.19.1",
-                  :slave        => {
-                     :master    => "zk://192.168.50.10:2181/mesos",
-                     :ip        => "192.168.50.11",
-                     :isolation => "process"
-                  }
-                }
-              }
-            end
-
-         when /^slave2$/
-            override.vm.network "public_network", type: "dhcp", bridge: "en1: Wi-Fi (AirPort)", :mac => "08002711DFFB"
-            override.vm.network "private_network", ip: "192.168.50.12", :mac => "08002711DFFC"
-            override.vm.provision :shell , :inline => <<SCRIPT
-    sed -n '/127.0.1.1/!p' -i.bak /etc/hosts
-SCRIPT
+        if is_master?(nodeinfo[:hostname]) then
+            override.vm.provision :shell, :inline => "sudo apt-get -y install marathon; sudo stop marathon; sudo start marathon"
+            override.vm.provision :shell, :inline => "sudo apt-get -y install chronos; sudo stop chronos; sudo start chronos"
         end
 
-            override.vm.provision :chef_solo do |chef|
-              # chef.log_level = :debug
-              chef.add_recipe "apt"
-              chef.add_recipe "mesos"
-
-              chef.add_recipe "docker::aufs"
-              chef.add_recipe "docker::lxc"
-              chef.add_recipe "docker"
-              chef.add_recipe "mesos::slave"
-              chef.add_recipe "mesos::docker-executor"
-              chef.json  = {
-                :mesos=> {
-                  :type         => "mesosphere",
-                  :version      => "0.19.1",
-                  :slave        => {
-                     :master    => "zk://192.168.50.10:2181/mesos",
-                     :ip        => "192.168.50.12",
-                     :isolation => "process"
-                  }
-                }
-              }
-            end
-
-        vb.name = 'mesos-' + "#{hst}"
-        # vb.gui = true
-        vb.customize ["modifyvm", :id, "--memory", 1024, "--cpus", 2 ]
+	override.vm.network "public_network", type: "dhcp", mac: nodeinfo[:public_mac], bridge: "en1: Wi-Fi (AirPort)"
+	override.vm.provision :shell, :inline => <<SCRIPT
+    sed -n '/127.0.1.1/!p' -i /etc/hosts
+SCRIPT
       end
     end
   end
