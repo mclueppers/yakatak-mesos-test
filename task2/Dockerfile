@@ -9,5 +9,4 @@ ADD apps /usr/local/bin/apps
 
 EXPOSE 18888
 
-CMD [ "/usr/local/bin/apps/simple_server.py" ]
-ENTRYPOINT /usr/bin/python2.7
+ENTRYPOINT /usr/bin/python2.7 /usr/local/bin/apps/simple_server.py
