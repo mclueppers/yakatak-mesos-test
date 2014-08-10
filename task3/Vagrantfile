@@ -1,7 +1,12 @@
 # -*- mode: ruby -*-
 # vi: set ft=ruby :
 
+# Author: Martin Dobrev
+#
+# This file resembles ideas taken from https://github.com/everpeace/vagrant-mesos
+
 # Configuration
+proxy_ip = "192.168.50.100"
 masters = [ { :ip => "192.168.50.10", :hostname => "master1", :public_mac => "08002711DFF7", :private_mac => "08002711DFF8" },
             { :ip => "192.168.50.11", :hostname => "master2", :public_mac => "08002711DFF9", :private_mac => "08002711DFFA" }
 ]
@@ -51,12 +56,38 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
     config.cache.enable :chef
   end
 
-  
+  config.vm.define "local-proxy" do |lproxy|
+    lproxy.vm.provider "virtualbox" do |vb, override|
+       override.vm.box = "Official Ubuntu 14.04 daily Cloud Image amd64 (Development release,  No Guest Additions)"  
+       override.vm.box_url = "https://cloud-images.ubuntu.com/vagrant/trusty/current/trusty-server-cloudimg-amd64-vagrant-disk1.box"
+
+       override.vm.hostname = "mesos-local-proxy"
+       override.vm.network "private_network", ip: "#{proxy_ip}"
+       override.vm.provision :hosts
+       vb.name = "mesos-local-proxy"
+
+       # Install Squid proxy
+       override.vm.provision :shell, :inline => <<SCRIPT
+    sudo apt-get -y install squid3
+    sed -n "s/^http_access deny all/http_access allow all/" -i /etc/squid3/squid.conf
+    sudo stop squid3
+    sudo start squid3
+SCRIPT
+    end
+  end
+
   [ masters, slaves ].flatten.each_with_index do |nodeinfo, i|
     config.vm.define nodeinfo[:hostname] do |node|
       node.vm.provider "virtualbox" do |vb, override|
 
         override.vm.box = "ubuntu/trusty64"
+
+        # Configure local-proxy to speed up redeployments at later stage
+        if Vagrant.has_plugin?("vagrant-proxyconf") then
+          override.proxy.http     = "http://#{proxy_ip}:3128/"
+          override.proxy.https    = "http://#{proxy_ip}:3128/"
+          override.proxy.no_proxy = "localhost,127.0.0.1,master1,master2,slave1,slave2"
+        end
 
         override.vm.hostname = "mesos-" + nodeinfo[:hostname]
         override.vm.network "private_network", ip: nodeinfo[:ip], mac: nodeinfo[:private_mac]
@@ -81,20 +112,29 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
               chef.add_recipe "mesos::master"
               chef.json  = {
                 :mesos=> {
-                   :type         => "mesosphere",
-                   :version      => "#{mesos_ver}",
-                   :master_ips   => masters.map { |m| "#{m[:ip]}" },
-                   :slave_ips    => slaves.map { |s| "#{s[:ip]}" },
-		   :mesosphere   => {
+                   :type       => "mesosphere",
+                   :version    => "#{mesos_ver}",
+                   :master_ips => masters.map { |m| "#{m[:ip]}" },
+                   :slave_ips  => slaves.map { |s| "#{s[:ip]}" },
+		   :mesosphere => {
 		       :with_zookeeper => true
 		   },
-                   :master       => {
-                       :cluster => "MyFirstMesosCluster",
-                       :quorum => "#{(masters.length.to_f/2).ceil}",
-                       :work_dir => master_work_dir,
-                       :zk => "zk://192.168.50.10:2181/mesos",
-                       :ip => "#{nodeinfo[:ip]}"
-                   }
+                   :master       => if masters.length > 0 then
+		       {
+                         :cluster  => "MyFirstMesosCluster",
+                         :quorum   => "#{(masters.length.to_f/2).ceil}",
+                         :work_dir => master_work_dir,
+                         :zk       => "zk://"+masters.map{ |master| master[:ip]+":2181" }.join(",")+"/mesos",
+                         :ip       => "#{nodeinfo[:ip]}"
+                       }
+		     else
+		       {
+		         :cluster  => "MyFirstMesosCluster",
+                         :quorum   => "#{(masters.length.to_f/2).ceil}",
+                         :work_dir => master_work_dir,
+			 :ip       => "#{nodeinfo[:ip]}"
+		       }
+		     end
                 }
               }
             elsif is_slave?(nodeinfo[:hostname]) then
@@ -108,9 +148,13 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
 	              :type         => "mesosphere",
 		      :version      => "#{mesos_ver}",
 		      :slave        => {
-		          :master       => "zk://192.168.50.10:2181/mesos",
+		          :master       => if masters.length > 0 then
+			                     "zk://"+masters.map{ |master| master[:ip]+":2181" }.join(",")+"/mesos"
+					   else
+					     "zk://"+masters[0][:ip]+":2181/mesos"
+					   end,
 			  :ip           => "#{nodeinfo[:ip]}",
-			  :isolation    => "process"
+			  :isolation    => "external"
 		      }
 		  }
 	       }
@@ -118,14 +162,49 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
 	  end
 
         if is_master?(nodeinfo[:hostname]) then
-            override.vm.provision :shell, :inline => "sudo apt-get -y install marathon; sudo stop marathon; sudo start marathon"
-            override.vm.provision :shell, :inline => "sudo apt-get -y install chronos; sudo stop chronos; sudo start chronos"
+	    # Install Marathon, stop it just in case and then start it. Ugly hack to avoid return code from restart function issue
+            override.vm.provision :shell, :inline => 'echo Installing Marathon; sudo apt-get -q -y install marathon; sudo stop marathon; sudo start marathon'
+
+	    # Install Chronos, stop it just in case and then start it.
+            override.vm.provision :shell, :inline => 'echo Installing Marathon; sudo apt-get -q -y install chronos; sudo stop chronos; sudo start chronos'
+
+	    # Fix ZooKeeper id and "restart" the services
+	    server_id = ( /^master(\d+)/.match nodeinfo[:hostname] )[1]
+	    override.vm.provision :shell, :inline => <<SCRIPT
+    echo "Fix ZooKeeper ID: #{server_id}"
+    echo #{server_id} > /etc/zookeeper/conf/myid
+    echo "Restart services one final time"
+    sudo initctl reload-configuration
+    sudo stop zookeeper
+    sudo start zookeeper
+    sudo stop mesos-master
+    sudo start mesos-master
+SCRIPT
         end
- 
+
+        if is_slave?(nodeinfo[:hostname]) then
+            # Install deimos, change Mesos slave configuration and restart it
+	    override.vm.provision :shell, :inline => <<SCRIPT
+    echo "Install Deimos"
+    sudo apt-get -q -y install deimos
+    echo "Set /etc/mesos-slave/containerizer_path"
+    echo "/usr/local/bin/deimos" > /etc/mesos-slave/containerizer_path
+    echo "Restart Mesos slave one final time"
+    sudo stop mesos-slave
+    sudo start mesos-slave
+SCRIPT
+            
+	    # Download Docker images
+	    override.vm.provision :shell, :inline => 'echo "Downloading Docker image libmesos/ubuntu:latest"; sudo docker pull libmesos/ubuntu:latest > /dev/null'
+	end
+
 	override.vm.network "public_network", type: "dhcp", mac: nodeinfo[:public_mac], bridge: "en1: Wi-Fi (AirPort)"
+
+	# Remove the 'dumb' loopback mapping for the hostname
 	override.vm.provision :shell, :inline => <<SCRIPT
     sed -n '/127.0.1.1/!p' -i /etc/hosts
 SCRIPT
+      
       end
     end
   end
