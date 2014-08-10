@@ -11,3 +11,7 @@ if [ ! -f .mesosphere_key_added ]; then
     sudo apt-get update
     touch .mesosphere_key_added
 fi
+
+# Remove cloud-init package (Breaks reboot sequence on VirtualBox installs)
+sudo apt-get -y remove cloud-init
+sudo update-initramfs -k all -u
