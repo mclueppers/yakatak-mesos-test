@@ -29,8 +29,7 @@ Once the Vagrant environment is build (on my laptop it takes nearly 20 minutes) 
 
 Vagrant creates 4 nodes - master1, master2, slave1, slave2
 
-|             |                              Nodes                            |
-|   Property  | :-----------: | :-----------: | :-----------: | :-----------: |
+|  Property   |                              Nodes                            |
 |             |    master1    |    master2    |    slave1     |   slave2      |
 | :---------- | :------------ | :------------ | :------------ | :------------ |
 | Hostname    | mesos-master1 | mesos-master2 | mesos-slave1  | mesos-slave2  |
