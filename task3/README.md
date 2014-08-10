@@ -4,7 +4,7 @@ Please complete task2 before continuing
 
 # Install additional Master
 
-Open Vagrantfile and [add a second master](task3/Vagrantfile#L6) server
+Open Vagrantfile and [add a second master](Vagrantfile#L6) server
 
 # Rebuild your Vagrant environment
 
