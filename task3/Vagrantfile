@@ -165,7 +165,7 @@ SCRIPT
 					     "zk://"+masters[0][:ip]+":2181/mesos"
 					   end,
 			  :ip           => "#{nodeinfo[:ip]}",
-			  :isolation    => "posix/cpu,posix/mem"
+			  :isolation    => "external"
 		      }
 		  }
 	       }
