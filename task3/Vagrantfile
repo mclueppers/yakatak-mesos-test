@@ -6,13 +6,22 @@
 # This file resembles ideas taken from https://github.com/everpeace/vagrant-mesos
 
 # Configuration
+# local-proxy settings
+proxy_enabled = true
 proxy_ip = "192.168.50.100"
+
+# Server settings 
+# Mesos master(s) 
 masters = [ { :ip => "192.168.50.10", :hostname => "master1", :public_mac => "08002711DFF7", :private_mac => "08002711DFF8" },
             { :ip => "192.168.50.11", :hostname => "master2", :public_mac => "08002711DFF9", :private_mac => "08002711DFFA" }
 ]
+
+# Mesos slave(s)
 slaves  = [ { :ip => "192.168.50.21", :hostname => "slave1", :public_mac => "08002711DFFB", :private_mac => "08002711DFFC" }, 
             { :ip => "192.168.50.22", :hostname => "slave2", :public_mac => "08002711DFFD", :private_mac => "08002711DFFE" },
 ]
+
+# Mesos version to install 
 mesos_ver = "0.19.1"
 
 # Definitions
@@ -56,23 +65,25 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
     config.cache.enable :chef
   end
 
-  config.vm.define "local-proxy" do |lproxy|
-    lproxy.vm.provider "virtualbox" do |vb, override|
-       override.vm.box = "Official Ubuntu 14.04 daily Cloud Image amd64 (Development release,  No Guest Additions)"  
-       override.vm.box_url = "https://cloud-images.ubuntu.com/vagrant/trusty/current/trusty-server-cloudimg-amd64-vagrant-disk1.box"
+  if proxy_enabled then
+    config.vm.define "local-proxy" do |lproxy|
+      lproxy.vm.provider "virtualbox" do |vb, override|
+         override.vm.box = "Official Ubuntu 14.04 daily Cloud Image amd64 (Development release,  No Guest Additions)"  
+         override.vm.box_url = "https://cloud-images.ubuntu.com/vagrant/trusty/current/trusty-server-cloudimg-amd64-vagrant-disk1.box"
 
-       override.vm.hostname = "mesos-local-proxy"
-       override.vm.network "private_network", ip: "#{proxy_ip}"
-       override.vm.provision :hosts
-       vb.name = "mesos-local-proxy"
+         override.vm.hostname = "mesos-local-proxy"
+         override.vm.network "private_network", ip: "#{proxy_ip}"
+         override.vm.provision :hosts
+         vb.name = "mesos-local-proxy"
 
-       # Install Squid proxy
-       override.vm.provision :shell, :inline => <<SCRIPT
+         # Install Squid proxy
+         override.vm.provision :shell, :inline => <<SCRIPT
     sudo apt-get -y install squid3
     sed -n "s/^http_access deny all/http_access allow all/" -i /etc/squid3/squid.conf
     sudo stop squid3
     sudo start squid3
 SCRIPT
+      end
     end
   end
 
@@ -83,7 +94,7 @@ SCRIPT
         override.vm.box = "ubuntu/trusty64"
 
         # Configure local-proxy to speed up redeployments at later stage
-        if Vagrant.has_plugin?("vagrant-proxyconf") then
+        if Vagrant.has_plugin?("vagrant-proxyconf") and proxy_enabled then
           override.proxy.http     = "http://#{proxy_ip}:3128/"
           override.proxy.https    = "http://#{proxy_ip}:3128/"
           override.proxy.no_proxy = "localhost,127.0.0.1,master1,master2,slave1,slave2"
@@ -154,7 +165,7 @@ SCRIPT
 					     "zk://"+masters[0][:ip]+":2181/mesos"
 					   end,
 			  :ip           => "#{nodeinfo[:ip]}",
-			  :isolation    => "external"
+			  :isolation    => "posix/cpu,posix/mem"
 		      }
 		  }
 	       }
@@ -170,13 +181,17 @@ SCRIPT
 
 	    # Fix ZooKeeper id and "restart" the services
 	    server_id = ( /^master(\d+)/.match nodeinfo[:hostname] )[1]
+            zk_zoo_cfg = masters.each_with_index.map{ |master, i| "server.#{i}="+master[:ip]+":2888:3888"}.join("\n")
 	    override.vm.provision :shell, :inline => <<SCRIPT
     echo "Fix ZooKeeper ID: #{server_id}"
     echo #{server_id} > /etc/zookeeper/conf/myid
+    echo "Fix zoo.cfg"
+    echo "#{zk_zoo_cfg}" >> /etc/zookeeper/conf/zoo.cfg
     echo "Restart services one final time"
     sudo initctl reload-configuration
     sudo stop zookeeper
     sudo start zookeeper
+    sleep 5
     sudo stop mesos-master
     sudo start mesos-master
 SCRIPT
@@ -191,6 +206,7 @@ SCRIPT
     echo "/usr/local/bin/deimos" > /etc/mesos-slave/containerizer_path
     echo "Restart Mesos slave one final time"
     sudo stop mesos-slave
+    sleep 2
     sudo start mesos-slave
 SCRIPT
             
